@@ -138,11 +138,13 @@ def create_dataloader():
         transform=image_transform
     )
     
+    pin_memory = torch.cuda.is_available()  #if using GPU, pin memory for faster transfer
+    
     loader = DataLoader(
         dataset,
         batch_size=BATCH_SIZE,
         shuffle=True,
-        pin_memory=True  # enables faster GPU transfer by allocating page-locked memory
+        pin_memory=pin_memory  # enables faster GPU transfer by allocating page-locked memory
     )
     
     return loader
