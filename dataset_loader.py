@@ -141,7 +141,8 @@ def create_dataloader():
     loader = DataLoader(
         dataset,
         batch_size=BATCH_SIZE,
-        shuffle=True
+        shuffle=True,
+        pin_memory=True  # enables faster GPU transfer by allocating page-locked memory
     )
     
     return loader

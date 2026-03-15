@@ -193,8 +193,7 @@ class MultimodalReportGenerator(nn.Module):
         The embedding layer converts them into vectors.
         """
         # Convert text tokens → embeddings
-        text_embeddings = self.language_model.shared(input_ids)
-        text_embeddings = text_embeddings.to(visual_tokens.device) #ensure same device
+        text_embeddings = self.language_model.shared(input_ids).to(visual_tokens.device) #ensure same device
         """
         shared because it's used for both input and output token embeddings in T5.
         Example shape:
