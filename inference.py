@@ -100,7 +100,7 @@ from hallucination_detector import compute_hallucination_rate
 
 
 # device configuration
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu"
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
 
 
