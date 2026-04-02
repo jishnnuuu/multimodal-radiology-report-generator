@@ -57,8 +57,8 @@ During Training, the system performs
 """
 
 #training configurations
-EPOCHS = 5
-LEARNING_RATE = 3e-5
+EPOCHS = 10
+LEARNING_RATE = 1e-5
 CHECKPOINT_DIR = "checkpoints"
 
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
