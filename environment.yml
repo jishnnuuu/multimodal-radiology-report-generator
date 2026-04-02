@@ -1,0 +1,4 @@
+name: rad
+channels:
+  - defaults
+prefix: /home/user22/jishnuProject/envs/rad

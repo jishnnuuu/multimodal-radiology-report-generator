@@ -1,2 +1,31 @@
+# --- Archive & Environment ---
 *.tgz
+*.tar.gz
+*.zip
 venv/
+.env
+*.sh
+# Keep your environment.yml tracked if you want others to replicate your setup
+# *.yml 
+
+# --- Python Junk ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.ipynb_checkpoints/
+
+# --- ML Specifics (Crucial for GPU servers) ---
+checkpoints/
+*.pt
+*.pth
+*.bin
+*.ckpt
+# If you use weights and biases or tensorboard:
+wandb/
+runs/
+
+# --- System/IDE ---
+.DS_Store
+.vscode/
+.idea/
