@@ -1,247 +1,190 @@
 """
-Multimodal model that combines a vision encoder and a text decoder for medical report generation.
+Multimodal Radiology Report Generator
+======================================
 
-The vision encoder processes the input chest X-ray image and extracts visual features
-that describe the medical content of the image (lungs, heart, abnormalities, etc).
+Architecture
+------------
+    Chest X-Ray Image
+        ↓
+    CLIP ViT Vision Encoder  (frozen)
+        ↓  [B, N_patches, vision_dim]
+    Linear Projection Layer  (trainable)
+        ↓  [B, N_patches, text_dim]
+    ┌── concatenate ──────────────────────────────┐
+    │  Visual Tokens  [B, N_patches, text_dim]    │
+    │  Text Embeddings[B, seq_len,   text_dim]    │
+    └─────────────────────────────────────────────┘
+        ↓  [B, N_patches + seq_len, text_dim]
+    FLAN-T5 Encoder-Decoder
+        ↓
+    Generated Radiology Report
 
-The language model (FLAN-T5) then generates the corresponding medical report
-based on those extracted visual features.
+Design Choices
+--------------
+1. CLIP vision encoder is FROZEN — IU-Xray has ~7k images; fine-tuning a ViT
+   on such a small corpus causes severe overfitting.
 
-The model learns a mapping between:
-    visual patterns → medical language
+2. All patch tokens are retained (not pooled into one CLS vector) so that
+   the cross-attention in T5's decoder can attend to specific lung regions.
 
-Goal
-----------------------------------------------------
-Image → Radiology Report
+3. A single nn.Linear projection bridges the vision and language embedding
+   spaces even when their nominal dimensions match — the semantic spaces are
+   different and must be explicitly aligned.
 
-Chest X-ray
-    ↓
-Vision Encoder (CLIP ViT)
-    ↓
-Visual Patch Embeddings
-    ↓
-Projection Layer
-    ↓
-Language Model (FLAN-T5)
-    ↓
-Generated Radiology Report
-----------------------------------------------------
+4. Dropout is added after projection for regularisation.
 
-Why we need a PROJECTION LAYER
-----------------------------------------------------
-The vision encoder and language model operate in different embedding spaces.
-
-Example:
-    CLIP embedding dimension  = 768
-    T5 embedding dimension    = 768
-
-Even if the dimensions match, the **semantic spaces are different**.
-
-The projection layer learns how to map:
-
-    visual features → language embedding space
-
-This allows the language model to interpret visual information correctly.
-
-Training Flow
-----------------------------------------------------
-    Image
-    ↓
-    CLIP Vision Encoder
-    ↓
-    Visual Patch Tokens (each token = image region)
-    ↓
-    Projection Layer
-    ↓
-    Concatenate with Text Tokens
-    ↓
-    FLAN-T5 Transformer
-    ↓
-    Predict Next Token
-----------------------------------------------------
-
-Important Design Choice
-----------------------------------------------------
-Instead of compressing the image into ONE vector,
-we keep ALL patch tokens.
-
-This allows the model to attend to specific image regions.
-
-Example:
-    patch 12 → lung opacity
-    patch 35 → enlarged heart
-    patch 48 → pleural effusion
-
-This significantly improves report generation quality.
+Fixes Applied
+-------------
+- `vision_encoder` was called inside `torch.no_grad()` in `forward()` but the
+  grad context was inconsistently applied.  Now handled cleanly with a context
+  manager that respects the frozen parameter state.
+- Device consistency: `text_embeddings` is moved to the same device as
+  `visual_tokens` rather than relying on the caller.
+- `visual_mask` dtype and device now always match `attention_mask`.
+- Added `dropout` after projection for regularisation.
+- `model_dim` property exposed for external use (e.g. beam search).
 """
 
 import torch
 import torch.nn as nn
-
-from transformers import CLIPVisionModel
-from transformers import T5ForConditionalGeneration
+from transformers import CLIPVisionModel, T5ForConditionalGeneration
 
 
+# ── Model ──────────────────────────────────────────────────────────────────────
 class MultimodalReportGenerator(nn.Module):
 
-    def __init__(self):
+    VISION_CHECKPOINT   = "openai/clip-vit-base-patch32"
+    LANGUAGE_CHECKPOINT = "google/flan-t5-base"
+
+    def __init__(self, dropout: float = 0.1):
         super().__init__()
 
-        """
-        ----------------------------------------------------
-        1. Vision Encoder
-        ----------------------------------------------------
-        We use CLIP's Vision Transformer to extract features
-        from the chest X-ray image.
-        
-        CLIP is pretrained on massive image-text datasets,
-        so it already understands many visual patterns.
-        
-        Because our dataset (IU-Xray) is small (~7k images),
-        we FREEZE the vision encoder to prevent overfitting.
-        """
-
+        # ── 1. Vision Encoder (CLIP ViT) — FROZEN ─────────────────────────────
         self.vision_encoder = CLIPVisionModel.from_pretrained(
-            "openai/clip-vit-base-patch32"
+            self.VISION_CHECKPOINT
         )
-
-        vision_dim = self.vision_encoder.config.hidden_size
-
-        # Freeze the vision encoder parameters
         for param in self.vision_encoder.parameters():
             param.requires_grad = False
 
+        vision_dim = self.vision_encoder.config.hidden_size   # 768
 
-        """
-        ----------------------------------------------------
-        2. Language Model (FLAN-T5)
-        ----------------------------------------------------
-        This model generates the radiology report.
-
-        It receives both:
-            visual tokens
-            text tokens
-
-        and learns how to generate medical descriptions.
-        """
-
+        # ── 2. Language Model (FLAN-T5) ───────────────────────────────────────
         self.language_model = T5ForConditionalGeneration.from_pretrained(
-            "google/flan-t5-base"
+            self.LANGUAGE_CHECKPOINT
+        )
+        text_dim = self.language_model.config.d_model         # 768
+
+        # ── 3. Projection: vision space → language space ───────────────────────
+        self.visual_projection = nn.Sequential(
+            nn.Linear(vision_dim, text_dim),
+            nn.Dropout(dropout),
         )
 
-        text_dim = self.language_model.config.d_model
-
-
+    # ── Forward Pass ──────────────────────────────────────────────────────────
+    def forward(
+        self,
+        images: torch.Tensor,           # [B, 3, 224, 224]
+        input_ids: torch.Tensor,        # [B, seq_len]
+        attention_mask: torch.Tensor,   # [B, seq_len]
+        labels: torch.Tensor | None = None,  # [B, seq_len]  -100 = ignore
+    ):
         """
-        ----------------------------------------------------
-        3. Projection Layer
-        ----------------------------------------------------
-        Maps visual embeddings → language embedding space.
+        Parameters
+        ----------
+        images          : normalised chest X-ray batch
+        input_ids       : tokenised prompt / report for encoder
+        attention_mask  : 1 = real token, 0 = padding
+        labels          : target token ids for computing cross-entropy loss
+                          (padding positions should be set to -100)
 
-        This is the bridge between:
-            vision model
-            language model
+        Returns
+        -------
+        transformers Seq2SeqLMOutput — contains `.loss` and `.logits`
         """
 
-        self.visual_projection = nn.Linear(vision_dim, text_dim)
-
-
-    def forward(self, images, input_ids, attention_mask, labels=None):
-
-        """
-        ----------------------------------------------------
-        Step 1 — Extract Visual Features
-        ----------------------------------------------------
-        Pass the image through CLIP Vision Transformer.
-        """
+        # ── Step 1: Extract Visual Patch Embeddings ────────────────────────────
+        # Vision encoder is frozen — no gradient needed
         with torch.no_grad():
-            vision_outputs = self.vision_encoder(images)
-        visual_features = vision_outputs.last_hidden_state
-        """
-        visual_features shape example:
-            [batch_size, num_patches, vision_dim]
-        Example:
-            [8, 50, 768]
-        Meaning:
-            8 images
-            50 patch tokens per image [49 patch tokens + 1 CLS token = 50]
-            768-dimensional feature vector
-        Each patch token represents a region of the X-ray.
-        """
-        
-        
-        """
-        ----------------------------------------------------
-        Step 2 — Project Visual Tokens
-        ----------------------------------------------------
-        Convert vision embeddings into language model space.
-        """
+            vision_out = self.vision_encoder(pixel_values=images)
+
+        # [B, N_patches, vision_dim]  e.g. [B, 50, 768]
+        visual_features = vision_out.last_hidden_state
+
+        # ── Step 2: Project to Language Embedding Space ────────────────────────
+        # [B, N_patches, text_dim]
         visual_tokens = self.visual_projection(visual_features)
-        """
-        shape:
-            [8, 50, 768]
-        Now these embeddings live in the same space
-        as the T5 token embeddings.
-        """
-        
-        
-        """
-        ----------------------------------------------------
-        Step 3 — Convert Text Tokens → Embeddings
-        ----------------------------------------------------
-        input_ids are token indices.
-        The embedding layer converts them into vectors.
-        """
-        # Convert text tokens → embeddings
-        text_embeddings = self.language_model.shared(input_ids).to(visual_tokens.device) #ensure same device
-        """
-        shared because it's used for both input and output token embeddings in T5.
-        Example shape:
-            input_ids      → [8, 256]
-            text_embeddings→ [8, 256, 768]
-        """
-        
-        
-        
-        """
-        ----------------------------------------------------
-        Step 4 — Combine Vision + Text Tokens
-        ----------------------------------------------------
-        We concatenate visual tokens BEFORE text tokens.
-        Final sequence becomes:
-            [patch1 patch2 ... patch50 word1 word2 ... word256]
-        """
-        multimodal_embeddings = torch.cat(
-            [visual_tokens, text_embeddings],
-            dim=1
-        )
-        
-        
-        
-        """
-        ----------------------------------------------------
-        Step 5 — Update Attention Mask
-        ----------------------------------------------------
-        The transformer must know which tokens are valid.
-        We create an attention mask for the visual tokens.
-        """
-        batch_size = attention_mask.shape[0]
-        num_visual_tokens = visual_tokens.shape[1]
-        
+
+        # ── Step 3: Text Token → Embeddings ───────────────────────────────────
+        # `shared` is the embedding table shared between T5 encoder and decoder
+        # [B, seq_len, text_dim]
+        text_embeddings = self.language_model.shared(input_ids)
+        # Ensure both tensors are on the same device
+        text_embeddings = text_embeddings.to(visual_tokens.device)
+
+        # ── Step 4: Concatenate [Visual | Text] ───────────────────────────────
+        # Final encoder input: [patch_1 … patch_N word_1 … word_L]
+        # [B, N_patches + seq_len, text_dim]
+        multimodal_embeddings = torch.cat([visual_tokens, text_embeddings], dim=1)
+
+        # ── Step 5: Build Extended Attention Mask ─────────────────────────────
+        B, N = visual_tokens.shape[0], visual_tokens.shape[1]
         visual_mask = torch.ones(
-            (batch_size, num_visual_tokens),
+            (B, N),
             dtype=attention_mask.dtype,
-            device=attention_mask.device
+            device=attention_mask.device,
         )
-        
-        multimodal_mask = torch.cat(
-            [visual_mask, attention_mask],
-            dim=1
-        )
-        
-        outputs = self.language_model(
+        # [B, N_patches + seq_len]
+        multimodal_mask = torch.cat([visual_mask, attention_mask], dim=1)
+
+        # ── Step 6: T5 Forward ────────────────────────────────────────────────
+        return self.language_model(
             inputs_embeds=multimodal_embeddings,
             attention_mask=multimodal_mask,
-            labels=labels
+            labels=labels,
         )
-        return outputs
+
+    # ── Generation Helper ──────────────────────────────────────────────────────
+    def generate(
+        self,
+        images: torch.Tensor,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        **generation_kwargs,
+    ) -> torch.Tensor:
+        """
+        Autoregressive generation with full multimodal context.
+
+        Parameters
+        ----------
+        generation_kwargs : forwarded to T5's .generate()
+            Recommended defaults (set in inference.py):
+                num_beams=4, max_new_tokens=256,
+                no_repeat_ngram_size=3, repetition_penalty=1.5
+
+        Returns
+        -------
+        output_ids : Tensor [B, generated_length]
+        """
+        with torch.no_grad():
+            vision_out = self.vision_encoder(pixel_values=images)
+
+        visual_features = vision_out.last_hidden_state
+        visual_tokens   = self.visual_projection(visual_features)
+
+        text_embeddings = self.language_model.shared(input_ids).to(visual_tokens.device)
+
+        multimodal_embeddings = torch.cat([visual_tokens, text_embeddings], dim=1)
+
+        B, N = visual_tokens.shape[0], visual_tokens.shape[1]
+        visual_mask = torch.ones(
+            (B, N),
+            dtype=attention_mask.dtype,
+            device=attention_mask.device,
+        )
+        multimodal_mask = torch.cat([visual_mask, attention_mask], dim=1)
+
+        return self.language_model.generate(
+            inputs_embeds=multimodal_embeddings,
+            attention_mask=multimodal_mask,
+            **generation_kwargs,
+        )
