@@ -112,12 +112,19 @@ class IUXrayDataset(Dataset):
         attention_mask = tokens["attention_mask"].squeeze(0)    #remove batch dimension --> [1 x 256] → [256]
         ## mask indicates: 1 → real token, 0 → padding
         
-        labels = input_ids.clone()
+        
         """
         when the report is padded,
         we do not want the model to learn to predict <PAD>
         so we set those padding token labels to -100, and pytorch cross-entropy loss will ignore them during loss calculation.
         """
+        labels = input_ids.clone()
+
+        # shift labels left (teacher forcing)
+        labels[:-1] = input_ids[1:]
+        labels[-1] = -100
+
+        # ignore padding
         labels[labels == self.tokenizer.pad_token_id] = -100
         
         return {
