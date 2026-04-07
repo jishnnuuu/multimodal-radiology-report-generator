@@ -72,7 +72,8 @@ LENGTH_PENALTY        = 1.0    # > 1 encourages longer output
 RETRIEVAL_TOP_K = 5
 
 # Prompt prefix
-PROMPT = "generate a detailed chest x-ray radiology report:"
+PROMPT = "Generate a radiology report:"
+tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME)
 
 
 # ── Result Container ───────────────────────────────────────────────────────────
@@ -185,7 +186,6 @@ def generate_report(
     -------
     str : decoded radiology report
     """
-    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME)
 
     tokens = tokenizer(
         PROMPT,
@@ -197,20 +197,22 @@ def generate_report(
     input_ids      = tokens["input_ids"].to(device)
     attention_mask = tokens["attention_mask"].to(device)
 
-    output_ids = model.generate(
-        images=image,
-        input_ids=input_ids,
-        attention_mask=attention_mask,
-        # ── Generation quality controls ────────────────────────────────────
-        num_beams=NUM_BEAMS,
-        max_new_tokens=MAX_NEW_TOKENS,
-        no_repeat_ngram_size=NO_REPEAT_NGRAM_SIZE,
-        repetition_penalty=REPETITION_PENALTY,
-        length_penalty=LENGTH_PENALTY,
-        early_stopping=True,
-    )
+    with torch.no_grad():
+        output_ids = model.generate(
+            images=image,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            # ── Generation quality controls ────────────────────────────────────
+            num_beams=NUM_BEAMS,
+            max_new_tokens=MAX_NEW_TOKENS,
+            no_repeat_ngram_size=NO_REPEAT_NGRAM_SIZE,
+            repetition_penalty=REPETITION_PENALTY,
+            length_penalty=LENGTH_PENALTY,
+            early_stopping=True,
+        )
 
     report = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+    report = report.replace("generate a radiology report:", "").strip()  # remove prompt from output
     return report
 
 
