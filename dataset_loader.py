@@ -90,6 +90,7 @@ class IUXrayDataset(Dataset):
         row = self.df.iloc[idx]
         image_path = row["image_path"]
         report = row["report"]
+        report = "generate a radiology report: " + report.strip()
         
         # Load image
         with Image.open(image_path) as img:
@@ -120,9 +121,9 @@ class IUXrayDataset(Dataset):
         """
         labels = input_ids.clone()
 
-        # shift labels left (teacher forcing)
-        labels[:-1] = input_ids[1:]
-        labels[-1] = -100
+        # # shift labels left (teacher forcing)
+        # labels[:-1] = input_ids[1:]
+        # labels[-1] = -100
 
         # ignore padding
         labels[labels == self.tokenizer.pad_token_id] = -100
@@ -151,7 +152,8 @@ def create_dataloader():
         dataset,
         batch_size=BATCH_SIZE,
         shuffle=True,
-        pin_memory=pin_memory  # enables faster GPU transfer by allocating page-locked memory
+        pin_memory=pin_memory,  # enables faster GPU transfer by allocating page-locked memory
+        num_workers= 2 if torch.cuda.is_available() else 0       # use multiple CPU cores to load data in parallel
     )
     
     return loader
