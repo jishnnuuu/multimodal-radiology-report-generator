@@ -44,147 +44,194 @@ Fixes Applied
 - Added `dropout` after projection for regularisation.
 - `model_dim` property exposed for external use (e.g. beam search).
 """
+"""
+Multimodal Radiology Report Generator
+=====================================
+
+Goal
+-----
+Generate a radiology report directly from a chest X-ray image.
+
+    Image → Report
+
+------------------------------------------------------------
+
+🚨 CRITICAL DESIGN FIX (IMPORTANT)
+
+Earlier approach (WRONG):
+--------------------------------
+    Image + Ground Truth Report → Predict Report
+
+Problem:
+    - Model learns to copy text instead of using image
+    - Loss becomes artificially very low
+    - Generation becomes meaningless at inference
+
+Correct approach (CURRENT):
+--------------------------------
+    Image → Predict Report
+
+This forces the model to:
+    - Actually learn visual understanding
+    - Map visual features → medical language
+
+------------------------------------------------------------
+
+Architecture
+------------
+
+    Chest X-ray Image
+        ↓
+    CLIP Vision Encoder (FROZEN)
+        ↓
+    Visual Patch Embeddings
+        ↓
+    Projection Layer
+        ↓
+    FLAN-T5 Language Model
+        ↓
+    Generated Radiology Report
+
+------------------------------------------------------------
+
+Key Design Choices
+------------------
+
+1. CLIP Vision Encoder is FROZEN
+   - Dataset is small (~7k images)
+   - Prevents overfitting
+   - Uses strong pretrained visual features
+
+2. Patch Tokens (NOT pooled)
+   - Each token = different region of image
+   - Helps model attend to:
+        lungs, heart, ribs, abnormalities
+
+3. Projection Layer
+   - Maps CLIP space → T5 embedding space
+   - Even if dims match, semantics differ
+
+4. NO TEXT INPUT during training
+   - Prevents shortcut learning
+   - Forces true multimodal learning
+
+------------------------------------------------------------
+"""
 
 import torch
 import torch.nn as nn
 from transformers import CLIPVisionModel, T5ForConditionalGeneration
 
 
-# ── Model ──────────────────────────────────────────────────────────────────────
 class MultimodalReportGenerator(nn.Module):
-
-    VISION_CHECKPOINT   = "openai/clip-vit-base-patch32"
-    LANGUAGE_CHECKPOINT = "google/flan-t5-base"
 
     def __init__(self, dropout: float = 0.1):
         super().__init__()
 
-        # ── 1. Vision Encoder (CLIP ViT) — FROZEN ─────────────────────────────
+        # ----------------------------------------------------
+        # 1. Vision Encoder (CLIP)
+        # ----------------------------------------------------
+        # Extracts visual features from X-ray
         self.vision_encoder = CLIPVisionModel.from_pretrained(
-            self.VISION_CHECKPOINT
+            "openai/clip-vit-base-patch32"
         )
+
+        # Freeze all parameters
         for param in self.vision_encoder.parameters():
             param.requires_grad = False
 
-        vision_dim = self.vision_encoder.config.hidden_size   # 768
+        vision_dim = self.vision_encoder.config.hidden_size  # usually 768
 
-        # ── 2. Language Model (FLAN-T5) ───────────────────────────────────────
+        # ----------------------------------------------------
+        # 2. Language Model (FLAN-T5)
+        # ----------------------------------------------------
+        # Generates radiology report
         self.language_model = T5ForConditionalGeneration.from_pretrained(
-            self.LANGUAGE_CHECKPOINT
+            "google/flan-t5-base"
         )
-        text_dim = self.language_model.config.d_model         # 768
 
-        # ── 3. Projection: vision space → language space ───────────────────────
+        text_dim = self.language_model.config.d_model  # usually 768
+
+        # ----------------------------------------------------
+        # 3. Projection Layer
+        # ----------------------------------------------------
+        # Aligns visual embeddings → language space
         self.visual_projection = nn.Sequential(
             nn.Linear(vision_dim, text_dim),
-            nn.Dropout(dropout),
+            nn.Dropout(dropout)
         )
 
-    # ── Forward Pass ──────────────────────────────────────────────────────────
+    # --------------------------------------------------------
+    # FORWARD (Training)
+    # --------------------------------------------------------
     def forward(
         self,
         images: torch.Tensor,           # [B, 3, 224, 224]
-        input_ids: torch.Tensor,        # [B, seq_len]
-        attention_mask: torch.Tensor,   # [B, seq_len]
-        labels: torch.Tensor | None = None,  # [B, seq_len]  -100 = ignore
+        input_ids: torch.Tensor,        # (NOT USED, kept for compatibility)
+        attention_mask: torch.Tensor,   # (NOT USED)
+        labels: torch.Tensor | None = None,
     ):
         """
-        Parameters
-        ----------
-        images          : normalised chest X-ray batch
-        input_ids       : tokenised prompt / report for encoder
-        attention_mask  : 1 = real token, 0 = padding
-        labels          : target token ids for computing cross-entropy loss
-                          (padding positions should be set to -100)
+        Training Flow:
+        ----------------
+            Image → Visual Tokens → T5 → Predict Report
 
-        Returns
-        -------
-        transformers Seq2SeqLMOutput — contains `.loss` and `.logits`
+        labels:
+            Ground truth report tokens
+            - Padding tokens should be -100 (ignored in loss)
         """
 
-        # ── Step 1: Extract Visual Patch Embeddings ────────────────────────────
-        # Vision encoder is frozen — no gradient needed
-        with torch.no_grad():
-            vision_out = self.vision_encoder(pixel_values=images)
+        # Step 1: Extract visual features
+        with torch.no_grad():  # CLIP is frozen
+            vision_outputs = self.vision_encoder(pixel_values=images)
 
-        # [B, N_patches, vision_dim]  e.g. [B, 50, 768]
-        visual_features = vision_out.last_hidden_state
+        visual_features = vision_outputs.last_hidden_state
+        # Shape: [B, N_patches, vision_dim]
 
-        # ── Step 2: Project to Language Embedding Space ────────────────────────
-        # [B, N_patches, text_dim]
+        # Step 2: Project to T5 space
         visual_tokens = self.visual_projection(visual_features)
+        # Shape: [B, N_patches, text_dim]
 
-        # ── Step 3: Text Token → Embeddings ───────────────────────────────────
-        # `shared` is the embedding table shared between T5 encoder and decoder
-        # [B, seq_len, text_dim]
-        text_embeddings = self.language_model.shared(input_ids)
-        # Ensure both tensors are on the same device
-        text_embeddings = text_embeddings.to(visual_tokens.device)
-
-        # ── Step 4: Concatenate [Visual | Text] ───────────────────────────────
-        # Final encoder input: [patch_1 … patch_N word_1 … word_L]
-        # [B, N_patches + seq_len, text_dim]
-        multimodal_embeddings = torch.cat([visual_tokens, text_embeddings], dim=1)
-
-        # ── Step 5: Build Extended Attention Mask ─────────────────────────────
-        B, N = visual_tokens.shape[0], visual_tokens.shape[1]
-        visual_mask = torch.ones(
-            (B, N),
-            dtype=attention_mask.dtype,
-            device=attention_mask.device,
-        )
-        # [B, N_patches + seq_len]
-        multimodal_mask = torch.cat([visual_mask, attention_mask], dim=1)
-
-        # ── Step 6: T5 Forward ────────────────────────────────────────────────
-        return self.language_model(
-            inputs_embeds=multimodal_embeddings,
-            attention_mask=multimodal_mask,
-            labels=labels,
+        # Step 3: Pass ONLY visual tokens to T5
+        outputs = self.language_model(
+            inputs_embeds=visual_tokens,
+            labels=labels
         )
 
-    # ── Generation Helper ──────────────────────────────────────────────────────
+        return outputs
+
+
+    # --------------------------------------------------------
+    # GENERATION (Inference)
+    # --------------------------------------------------------
     def generate(
         self,
         images: torch.Tensor,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor,
+        input_ids: torch.Tensor,        # (NOT USED)
+        attention_mask: torch.Tensor,   # (NOT USED)
         **generation_kwargs,
-    ) -> torch.Tensor:
+    ):
         """
-        Autoregressive generation with full multimodal context.
+        Inference Flow:
+        ----------------
+            Image → Visual Tokens → Generate Report
 
-        Parameters
-        ----------
-        generation_kwargs : forwarded to T5's .generate()
-            Recommended defaults (set in inference.py):
-                num_beams=4, max_new_tokens=256,
-                no_repeat_ngram_size=3, repetition_penalty=1.5
-
-        Returns
-        -------
-        output_ids : Tensor [B, generated_length]
+        generation_kwargs:
+            num_beams, max_new_tokens, etc.
         """
+
         with torch.no_grad():
-            vision_out = self.vision_encoder(pixel_values=images)
+            vision_outputs = self.vision_encoder(pixel_values=images)
 
-        visual_features = vision_out.last_hidden_state
-        visual_tokens   = self.visual_projection(visual_features)
+        visual_features = vision_outputs.last_hidden_state
 
-        text_embeddings = self.language_model.shared(input_ids).to(visual_tokens.device)
+        # Project to language space
+        visual_tokens = self.visual_projection(visual_features)
 
-        multimodal_embeddings = torch.cat([visual_tokens, text_embeddings], dim=1)
-
-        B, N = visual_tokens.shape[0], visual_tokens.shape[1]
-        visual_mask = torch.ones(
-            (B, N),
-            dtype=attention_mask.dtype,
-            device=attention_mask.device,
+        # Generate report
+        output_ids = self.language_model.generate(
+            inputs_embeds=visual_tokens,
+            **generation_kwargs
         )
-        multimodal_mask = torch.cat([visual_mask, attention_mask], dim=1)
 
-        return self.language_model.generate(
-            inputs_embeds=multimodal_embeddings,
-            attention_mask=multimodal_mask,
-            **generation_kwargs,
-        )
+        return output_ids
