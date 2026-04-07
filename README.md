@@ -60,6 +60,7 @@ multimodal-radiology-report-generator/
 ├── dataset_loader.py           # PyTorch data pipeline
 ├── train.py                    # Training script
 ├── inference.py                # Single image generation and analysis
+├── app.py                      # Streamlit web application for interactive demo
 ├── evaluate.py                 # Quantitative metric calculation
 └── README.md
 ```
@@ -116,6 +117,35 @@ python evaluate.py
 
 ---
 
+## Web Application (Streamlit Demo)
+
+An interactive web interface is provided to demonstrate the full end-to-end pipeline, enabling real-time report generation, retrieval, and hallucination analysis.
+
+### Features
+
+- Upload chest X-ray images
+- Generate radiology reports using the multimodal model
+- Retrieve semantically similar reports using FAISS
+- Perform hallucination detection with entity-level validation
+
+### Run the Web App
+
+```bash
+pip install streamlit
+streamlit run app.py
+```
+---
+
+### Demo Preview
+
+#### Upload Interface
+![Upload](assets/interface.png)
+
+#### Uploaded X-ray and Generating Report\
+![Generating](assets/model_inference.png)
+
+#### Generated Report and Retrieval
+![Report](assets/results.png)
 ## Implementation Insights
 
 * **Semantic Projection:** Multimodal alignment requires a dedicated projection layer to map visual tokens into the language space, rather than simple dimension matching.
