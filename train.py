@@ -29,7 +29,6 @@ Dataset → DataLoader → Model → Loss → Backpropagation
 ------------------------------------------------
 
 
-
 During Training, the system performs
     Load Dataset
         ↓
@@ -57,7 +56,7 @@ During Training, the system performs
 """
 
 #training configurations
-EPOCHS = 10
+EPOCHS = 20
 LEARNING_RATE = 1e-5
 CHECKPOINT_DIR = "checkpoints"
 
@@ -92,61 +91,68 @@ optimizer = AdamW(
 #mixed precision scaler
 scaler = GradScaler(device=device.type)
 
+# Initialize best_loss with infinity
+best_loss = float('inf')
 
-#training loop
+# training loop
 for epoch in range(EPOCHS):
     print(f"\nEpoch {epoch+1}/{EPOCHS}")
     model.train()
-    model.vision_encoder.eval()  #ensure vision encoder is in eval mode
+    model.vision_encoder.eval() 
     total_loss = 0
     progress_bar = tqdm(dataloader)
+    
     for batch in progress_bar:
         images = batch["image"].to(device, non_blocking=True)
         input_ids = batch["input_ids"].to(device, non_blocking=True)
         attention_mask = batch["attention_mask"].to(device, non_blocking=True)
         labels = batch["labels"].to(device, non_blocking=True)
 
-        #mixed precision forward pass
-        with autocast(device_type=device.type):
-            outputs = model(
-                images=images,
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=labels
-            )
-            loss = outputs.loss
+        outputs = model(
+            images=images,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=labels
+        )
+        loss = outputs.loss
         
-        #backward pass with gradient scaling
-        scaler.scale(loss).backward()
+        if torch.isnan(loss):
+            print("NaN loss detected — check LR, labels, or input data")
+            raise ValueError("NaN loss")
 
-        # gradient clipping
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        
         scaler.step(optimizer)
         scaler.update()
         optimizer.zero_grad(set_to_none=True)
         
         total_loss += loss.item()
-        
         progress_bar.set_postfix(loss=loss.item(), avg_loss=total_loss/(progress_bar.n+1))
         
     avg_loss = total_loss / len(dataloader)
-    
     print(f"Epoch {epoch+1} Average Loss: {avg_loss:.4f}")
 
-
-    #save checkpoint
-    checkpoint_path = os.path.join(
-        CHECKPOINT_DIR,
-        f"model_epoch_{epoch+1}.pt"
-    )
+    # --- SAVE LOGIC ---
     
-    torch.save({
-            "epoch": epoch,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "loss": avg_loss
-        }, checkpoint_path)
-    print("Checkpoint saved:", checkpoint_path)
+    # 1. Prepare the checkpoint data
+    checkpoint = {
+        "epoch": epoch,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "loss": avg_loss
+    }
+
+    # 2. Save the regular epoch checkpoint
+    epoch_path = os.path.join(CHECKPOINT_DIR, f"model_epoch_{epoch+1}.pt")
+    torch.save(checkpoint, epoch_path)
+    print(f"Checkpoint saved: {epoch_path}")
+
+    # 3. Check if this is the BEST model so far
+    if avg_loss < best_loss:
+        best_loss = avg_loss
+        best_path = os.path.join(CHECKPOINT_DIR, "best_model.pt")
+        torch.save(checkpoint, best_path)
+        print(f"New best model found! Saved to: {best_path}")
 
 print("\nTraining Complete.")
