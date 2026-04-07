@@ -4,6 +4,17 @@ This repository implements an end-to-end multimodal deep learning system designe
 
 ---
 
+### Demo Preview
+
+#### Upload Interface
+![Upload](assets/interface.png)
+
+#### Uploaded X-ray and Generating Report
+![Generating](assets/model_inference.png)
+
+#### Generated Report and Retrieval
+![Report](assets/results.png)
+
 ## Overview
 
 Generating radiology reports automatically requires more than just image-to-text mapping; it requires clinical accuracy. This project addresses the "hallucination" problem common in generative models by incorporating:
@@ -136,16 +147,6 @@ streamlit run app.py
 ```
 ---
 
-### Demo Preview
-
-#### Upload Interface
-![Upload](assets/interface.png)
-
-#### Uploaded X-ray and Generating Report\
-![Generating](assets/model_inference.png)
-
-#### Generated Report and Retrieval
-![Report](assets/results.png)
 ## Implementation Insights
 
 * **Semantic Projection:** Multimodal alignment requires a dedicated projection layer to map visual tokens into the language space, rather than simple dimension matching.
