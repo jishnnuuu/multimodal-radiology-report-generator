@@ -16,9 +16,9 @@ __pycache__/
 .ipynb_checkpoints/
 
 # --- ML Specifics (Crucial for GPU servers) ---
-checkpoints/
+checkpoints/*
 *.pt
-!best_model.pt  # Keep the best model checkpoint, if you want
+!checkpoints/best_model.pt  # Keep the best model checkpoint, if you want
 *.pth
 *.bin
 *.ckpt
