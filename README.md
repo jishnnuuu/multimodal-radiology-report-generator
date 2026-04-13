@@ -67,6 +67,8 @@ multimodal-radiology-report-generator/
 ├── retrieval/
 │   ├── build_faiss_index.py    # Embedding generation and indexing
 │   └── retrieve_faiss.py       # Semantic search utilities
+├── preprocessing/
+│   ├── parse_xml.py            # Parse XML files for data report retrieval
 ├── hallucination_detector.py   # Entity-level verification logic
 ├── dataset_loader.py           # PyTorch data pipeline
 ├── train.py                    # Training script
@@ -95,23 +97,23 @@ pip install -r requirements.txt
 ### 3. Data Preparation
 Convert raw XML radiology reports into a structured CSV format with train, validation, and test splits:
 ```bash
-python parse_xml.py
+python preprocessing/parse_xml.py
 ```
 
 ---
 
 ## Usage Guide
 
-### Training
-Train the projection layer and fine-tune the FLAN-T5 model using CLIP visual features:
-```bash
-python train.py
-```
-
 ### Build Retrieval Index
 Encode training reports and build the FAISS index to enable factual validation during inference:
 ```bash
 python retrieval/build_faiss_index.py
+```
+
+### Training
+Train the projection layer and fine-tune the FLAN-T5 model using CLIP visual features:
+```bash
+python train.py
 ```
 
 ### Inference
